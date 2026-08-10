@@ -1,6 +1,7 @@
 """Render the markdown PMO dashboard from current state."""
+import re
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from importlib.resources import files
 from pathlib import Path
 
@@ -20,6 +21,62 @@ from build_platform.state import (
 def _template(filename: str = "dashboard.md.j2") -> Template:
     src = files("build_platform.templates").joinpath(filename).read_text(encoding="utf-8")
     return Template(src, autoescape=select_autoescape(), keep_trailing_newline=True)
+
+
+_DECISION_HEADER = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})\s+—\s+(.+?)\s*$")
+
+
+def _recent_decisions(project_root: Path, within_days: int = 7) -> list[dict]:
+    """Return decisions logged in the last ``within_days`` days, newest first.
+
+    Parses ``.brains-build/decisions.md`` — the ledger appended by
+    ``/build-decision`` — where each entry has the form::
+
+        ## YYYY-MM-DD — <title>
+        **Owner:** <owner>
+        ...
+        **Related WPs:** <related>
+
+    Returns ``[]`` when the ledger is absent. This is the dashboard's
+    "Recent decisions (last 7 days)" section — the record of *why* the
+    architecture is what it is, so an empty list here means no decisions
+    were logged in the window, not that logging is broken.
+    """
+    ledger = state_dir(project_root) / "decisions.md"
+    if not ledger.exists():
+        return []
+
+    def _field(block: list[str], name: str) -> str:
+        prefix = f"**{name}:**"
+        for line in block:
+            if line.startswith(prefix):
+                return line[len(prefix):].strip()
+        return ""
+
+    today = datetime.now(timezone.utc).date()
+    lines = ledger.read_text(encoding="utf-8").splitlines()
+    starts = [i for i, ln in enumerate(lines) if _DECISION_HEADER.match(ln)]
+    out: list[dict] = []
+    for idx, start in enumerate(starts):
+        m = _DECISION_HEADER.match(lines[start])
+        assert m is not None  # guaranteed by the starts filter
+        try:
+            logged = date.fromisoformat(m.group(1))
+        except ValueError:
+            continue
+        age = (today - logged).days
+        if age < 0 or age > within_days:
+            continue
+        end = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
+        block = lines[start + 1:end]
+        out.append({
+            "date": m.group(1),
+            "title": m.group(2),
+            "owner": _field(block, "Owner") or "unknown",
+            "related": _field(block, "Related WPs") or "_None_",
+        })
+    out.sort(key=lambda e: e["date"], reverse=True)
+    return out
 
 
 def _sprint_number(project_root: Path) -> int:
@@ -119,7 +176,7 @@ def _assemble_context(project_root: Path) -> dict:
         "reason": (wp.history[-1].event if wp.history else "unknown"),
         "needs_user": True, "suggestion": "investigate via audit log",
     } for wp in wps if wp.state == WPState.BLOCKED]
-    decisions: list[dict] = []
+    decisions = _recent_decisions(project_root)
     up_next = [{
         "id": wp.id, "title": wp.title, "workstream": wp.workstream,
         "tier": int(wp.tier.value), "autonomy": wp.autonomy.value,

@@ -1,7 +1,9 @@
 """Tests for render_dashboard.py."""
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from build_platform.audit import AuditEntry, write_audit
+from build_platform.paths import state_dir
 from build_platform.render_dashboard import (
     render_dashboard,
     render_dashboard_all,
@@ -261,3 +263,54 @@ def test_dashboard_html_includes_cost_burn(tmp_path: Path):
     html = render_dashboard_html(tmp_path).read_text(encoding="utf-8")
     assert "Cost burn" in html
     assert "0.0010" in html
+
+
+# --- Recent decisions (last 7 days) --------------------------------------
+
+
+def _write_decision(tmp_path: Path, *, day: date, title: str,
+                    owner: str = "build-dev-orchestrator", related: str = "WP-0001") -> None:
+    """Append a decision to the ledger in the exact shape `/build-decision` writes."""
+    ledger = state_dir(tmp_path) / "decisions.md"
+    ledger.write_text(
+        ledger.read_text(encoding="utf-8") if ledger.exists() else "",
+        encoding="utf-8",
+    )
+    with ledger.open("a", encoding="utf-8") as f:
+        f.write(
+            f"\n## {day.isoformat()} — {title}\n"
+            f"**Owner:** {owner}\n"
+            f"**Decision:** something\n"
+            f"**Why:** because\n"
+            f"**Alternatives considered:** _None_\n"
+            f"**Related WPs:** {related}\n"
+            f"**Audit:** _None_\n"
+        )
+
+
+def test_dashboard_lists_recent_decision(tmp_path: Path):
+    _seed(tmp_path)
+    today = datetime.now(timezone.utc).date()
+    _write_decision(tmp_path, day=today, title="Adopt hexagonal layout",
+                    owner="user:matthew", related="WP-0002")
+    text = render_dashboard(tmp_path).read_text(encoding="utf-8")
+    assert "Adopt hexagonal layout" in text
+    assert "user:matthew" in text
+    assert "WP-0002" in text
+
+
+def test_dashboard_omits_decisions_older_than_7_days(tmp_path: Path):
+    _seed(tmp_path)
+    today = datetime.now(timezone.utc).date()
+    _write_decision(tmp_path, day=today - timedelta(days=40), title="Stale decision")
+    _write_decision(tmp_path, day=today - timedelta(days=1), title="Fresh decision")
+    text = render_dashboard(tmp_path).read_text(encoding="utf-8")
+    assert "Fresh decision" in text
+    assert "Stale decision" not in text
+
+
+def test_dashboard_decisions_empty_without_ledger(tmp_path: Path):
+    _seed(tmp_path)
+    # No decisions.md written — section header still renders, but no entries.
+    text = render_dashboard(tmp_path).read_text(encoding="utf-8")
+    assert "## Recent decisions" in text
